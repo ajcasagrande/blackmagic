@@ -4,9 +4,9 @@ OBJCOPY = $(CROSS_COMPILE)objcopy
 
 CFLAGS += -Istm32/include -mcpu=cortex-m3 -mthumb \
 	-DSTM32F1 -DBLACKMAGIC -I../libopencm3/include \
-	-Iplatforms/stm32
+	-Iplatforms/stm32 -DDFU_SERIAL_LENGTH=9
 
-LDFLAGS_BOOT := $(LDFLAGS) -lopencm3_stm32f1 -Wl,--defsym,_stack=0x20005000 \
+LDFLAGS_BOOT := $(LDFLAGS) --specs=nano.specs -lopencm3_stm32f1 \
 	-Wl,-T,platforms/stm32/blackmagic.ld -nostartfiles -lc \
 	-Wl,-Map=mapfile -mthumb -mcpu=cortex-m3 -Wl,-gc-sections \
 	-L../libopencm3/lib
@@ -21,6 +21,7 @@ endif
 VPATH += platforms/stm32
 
 SRC += 	cdcacm.c	\
+	traceswodecode.c	\
 	traceswo.c	\
 	usbuart.c	\
 	serialno.c	\
@@ -29,10 +30,9 @@ SRC += 	cdcacm.c	\
 
 all:	blackmagic.bin blackmagic_dfu.bin blackmagic_dfu.hex
 
-blackmagic_dfu: usbdfu.o dfucore.o dfu_f1.o
+blackmagic_dfu.elf: usbdfu.o dfucore.o dfu_f1.o serialno.o
 	@echo "  LD      $@"
 	$(Q)$(CC) $^ -o $@ $(LDFLAGS_BOOT)
 
 host_clean:
-	-$(Q)$(RM) -f blackmagic.bin blackmagic_dfu blackmagic_dfu.bin blackmagic_dfu.hex
-
+	-$(Q)$(RM) blackmagic.bin blackmagic_dfu blackmagic_dfu.bin blackmagic_dfu.hex

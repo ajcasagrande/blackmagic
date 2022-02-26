@@ -21,16 +21,13 @@
 #include <libopencm3/usb/usbd.h>
 
 #include "timing.h"
-#include "version.h"
 
-#define BOARD_IDENT             "Black Magic Probe (Launchpad ICDI), (Firmware " FIRMWARE_VERSION ")"
-#define BOARD_IDENT_DFU		"Black Magic (Upgrade) for Launchpad, (Firmware " FIRMWARE_VERSION ")"
-#define DFU_IDENT               "Black Magic Firmware Upgrade (Launchpad)"
-#define DFU_IFACE_STRING	"lolwut"
+#define PLATFORM_IDENT      "(Launchpad ICDI) "
 
 #define SCB_RESET()		scb_reset_core();
 
 extern uint8_t running_status;
+extern uint32_t swd_delay_cnt;
 
 #define TMS_PORT	GPIOA_BASE
 #define TMS_PIN		GPIO3
@@ -70,7 +67,7 @@ extern uint8_t running_status;
 	gpio_set_output_config(SWDIO_PORT, GPIO_OTYPE_PP, GPIO_DRIVE_2MA, SWDIO_PIN);		\
 }
 
-extern usbd_driver lm4f_usb_driver;
+extern const usbd_driver lm4f_usb_driver;
 #define USB_DRIVER	lm4f_usb_driver
 #define USB_IRQ		NVIC_USB0_IRQ
 #define USB_ISR		usb0_isr
@@ -99,8 +96,6 @@ extern usbd_driver lm4f_usb_driver;
 #define sprintf siprintf
 #define vasprintf vasiprintf
 #define snprintf sniprintf
-
-#define DEBUG(...)
 
 #define SET_RUN_STATE(state)	{running_status = (state);}
 #define SET_IDLE_STATE(state)	{}

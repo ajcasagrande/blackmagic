@@ -22,12 +22,13 @@
 #include "target.h"
 #include "adiv5.h"
 
-extern long cortexm_wait_timeout;
+extern unsigned cortexm_wait_timeout;
 /* Private peripheral bus base address */
 #define CORTEXM_PPB_BASE	0xE0000000
 
 #define CORTEXM_SCS_BASE	(CORTEXM_PPB_BASE + 0xE000)
 
+#define CORTEXM_CPUID		(CORTEXM_SCS_BASE + 0xD00)
 #define CORTEXM_AIRCR		(CORTEXM_SCS_BASE + 0xD0C)
 #define CORTEXM_CFSR		(CORTEXM_SCS_BASE + 0xD28)
 #define CORTEXM_HFSR		(CORTEXM_SCS_BASE + 0xD2C)
@@ -144,10 +145,12 @@ extern long cortexm_wait_timeout;
 #define CORTEXM_FPB_CTRL_KEY		(1 << 1)
 #define CORTEXM_FPB_CTRL_ENABLE		(1 << 0)
 
-/* Data Watchpoint and Trace Mask Register (DWT_MASKx) */
-#define CORTEXM_DWT_MASK_BYTE		(0 << 0)
-#define CORTEXM_DWT_MASK_HALFWORD	(1 << 0)
-#define CORTEXM_DWT_MASK_WORD		(3 << 0)
+/* Data Watchpoint and Trace Mask Register (DWT_MASKx)
+*  The value here is the number of address bits we mask out */
+#define CORTEXM_DWT_MASK_BYTE		(0)
+#define CORTEXM_DWT_MASK_HALFWORD	(1)
+#define CORTEXM_DWT_MASK_WORD		(2)
+#define CORTEXM_DWT_MASK_DWORD		(3)
 
 /* Data Watchpoint and Trace Function Register (DWT_FUNCTIONx) */
 #define CORTEXM_DWT_FUNC_MATCHED	(1 << 24)
@@ -165,15 +168,28 @@ extern long cortexm_wait_timeout;
 #define REG_SPECIAL	19
 
 #define ARM_THUMB_BREAKPOINT 0xBE00
+#define CORTEXM_XPSR_THUMB (1 << 24)
 
 #define	CORTEXM_TOPT_INHIBIT_SRST (1 << 2)
+
+enum cortexm_types {
+	CORTEX_M0  = 0xc200,
+	CORTEX_M0P = 0xc600,
+	CORTEX_M3  = 0xc230,
+	CORTEX_M4  = 0xc240,
+	CORTEX_M7  = 0xc270,
+	CORTEX_M23 = 0xd200,
+	CORTEX_M33 = 0xd210,
+};
+#define CPUID_PARTNO_MASK 0xfff0
+#define CPUID_REVISION_MASK 0x00f00000
+#define CPUID_PATCH_MASK 0xf
 
 bool cortexm_probe(ADIv5_AP_t *ap);
 ADIv5_AP_t *cortexm_ap(target *t);
 
 bool cortexm_attach(target *t);
 void cortexm_detach(target *t);
-void cortexm_halt_resume(target *t, bool step);
 int cortexm_run_stub(target *t, uint32_t loadaddr,
                      uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3);
 int cortexm_mem_write_sized(

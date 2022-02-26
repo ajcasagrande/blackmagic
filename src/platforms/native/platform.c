@@ -27,14 +27,14 @@
 #include "usbuart.h"
 #include "morse.h"
 
-#include <libopencm3/stm32/f1/rcc.h>
+#include <libopencm3/stm32/rcc.h>
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/scs.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/exti.h>
 #include <libopencm3/stm32/usart.h>
 #include <libopencm3/usb/usbd.h>
-#include <libopencm3/stm32/f1/adc.h>
+#include <libopencm3/stm32/adc.h>
 
 static void adc_init(void);
 static void setup_vbus_irq(void);
@@ -43,6 +43,7 @@ static void setup_vbus_irq(void);
  * 000 - Original production build.
  * 001 - Mini production build.
  * 010 - Mini V2.0e and later.
+ * 011 - Mini V2.1e and later.
  */
 int platform_hwversion(void)
 {
@@ -96,7 +97,7 @@ void platform_init(void)
 	initialise_monitor_handles();
 #endif
 
-	rcc_clock_setup_in_hse_8mhz_out_72mhz();
+	rcc_clock_setup_pll(&rcc_hse_configs[RCC_CLOCK_HSE8_72MHZ]);
 
 	/* Enable peripherals */
 	rcc_periph_clock_enable(RCC_USB);
@@ -113,6 +114,11 @@ void platform_init(void)
 	gpio_set_mode(JTAG_PORT, GPIO_MODE_OUTPUT_50_MHZ,
 			GPIO_CNF_OUTPUT_PUSHPULL,
 			TMS_DIR_PIN | TMS_PIN | TCK_PIN | TDI_PIN);
+	gpio_set_mode(JTAG_PORT, GPIO_MODE_OUTPUT_50_MHZ,
+			GPIO_CNF_OUTPUT_PUSHPULL,
+			TMS_DIR_PIN | TCK_PIN | TDI_PIN);
+	gpio_set_mode(JTAG_PORT, GPIO_MODE_OUTPUT_50_MHZ,
+			GPIO_CNF_INPUT_FLOAT, TMS_PIN);
 	/* This needs some fixing... */
 	/* Toggle required to sort out line drivers... */
 	gpio_port_write(GPIOA, 0x8102);
@@ -125,10 +131,6 @@ void platform_init(void)
 			GPIO_CNF_OUTPUT_PUSHPULL,
 			LED_UART | LED_IDLE_RUN | LED_ERROR);
 
-	/* FIXME: This pin in intended to be input, but the TXS0108 fails
-	 * to release the device from reset if this floats. */
-	gpio_set_mode(GPIOA, GPIO_MODE_OUTPUT_2_MHZ,
-			GPIO_CNF_OUTPUT_PUSHPULL, GPIO7);
 	/* Enable SRST output. Original uses a NPN to pull down, so setting the
 	 * output HIGH asserts. Mini is directly connected so use open drain output
 	 * and set LOW to assert.
@@ -140,7 +142,17 @@ void platform_init(void)
 			 ? GPIO_CNF_OUTPUT_PUSHPULL
 			 : GPIO_CNF_OUTPUT_OPENDRAIN),
 			SRST_PIN);
-
+	/* FIXME: Gareth, Esden, what versions need this fix? */
+	if (platform_hwversion() < 3) {
+		/* FIXME: This pin in intended to be input, but the TXS0108 fails
+		 * to release the device from reset if this floats. */
+		gpio_set_mode(SRST_SENSE_PORT, GPIO_MODE_OUTPUT_2_MHZ,
+					  GPIO_CNF_OUTPUT_PUSHPULL, SRST_SENSE_PIN);
+	} else {
+		gpio_set(SRST_SENSE_PORT, SRST_SENSE_PIN);
+		gpio_set_mode(SRST_SENSE_PORT, GPIO_MODE_INPUT,
+		              GPIO_CNF_INPUT_PULL_UPDOWN, SRST_SENSE_PIN);
+	}
 	/* Enable internal pull-up on PWR_BR so that we don't drive
 	   TPWR locally or inadvertently supply power to the target. */
 	if (platform_hwversion () == 1) {
@@ -239,12 +251,16 @@ static void adc_init(void)
 	adc_calibrate(ADC1);
 }
 
-const char *platform_target_voltage(void)
+uint32_t platform_target_voltage_sense(void)
 {
+	/* returns the voltage in volt scaled by 10 (so 33 means 3.3V), except
+	 * for hardware version 1
+	 * this function is only needed for implementations that allow the
+	 * target to be powered from the debug probe
+	 */
 	if (platform_hwversion() == 0)
-		return gpio_get(GPIOB, GPIO0) ? "OK" : "ABSENT!";
+		return 0;
 
-	static char ret[] = "0.0V";
 	const uint8_t channel = 8;
 	adc_set_regular_sequence(ADC1, 1, (uint8_t*)&channel);
 
@@ -253,9 +269,19 @@ const char *platform_target_voltage(void)
 	/* Wait for end of conversion. */
 	while (!adc_eoc(ADC1));
 
-	uint32_t val = adc_read_regular(ADC1) * 99; /* 0-4095 */
-	ret[0] = '0' + val / 81910;
-	ret[2] = '0' + (val / 8191) % 10;
+	uint32_t val = adc_read_regular(ADC1); /* 0-4095 */
+	return (val * 99) / 8191;
+}
+
+const char *platform_target_voltage(void)
+{
+	if (platform_hwversion() == 0)
+		return gpio_get(GPIOB, GPIO0) ? "OK" : "ABSENT!";
+
+	static char ret[] = "0.0V";
+	uint32_t val = platform_target_voltage_sense();
+	ret[0] = '0' + val / 10;
+	ret[2] = '0' + val % 10;
 
 	return ret;
 }

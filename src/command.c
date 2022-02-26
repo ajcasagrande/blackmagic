@@ -3,6 +3,8 @@
  *
  * Copyright (C) 2011  Black Sphere Technologies Ltd.
  * Written by Gareth McMullin <gareth@blacksphere.co.nz>
+ * Copyright (C) 2021 Uwe Bonnes
+ *                            (bon@elektron.ikp.physik.tu-darmstadt.de)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,45 +29,34 @@
 #include "command.h"
 #include "gdb_packet.h"
 #include "target.h"
+#include "target_internal.h"
 #include "morse.h"
 #include "version.h"
+#include "serialno.h"
 
 #ifdef PLATFORM_HAS_TRACESWO
 #	include "traceswo.h"
 #endif
 
-typedef bool (*cmd_handler)(target *t, int argc, const char **argv);
-
-struct command_s {
-	const char *cmd;
-	cmd_handler handler;
-
-	const char *help;
-};
-
-enum assert_srst_t{
-	ASSERT_NEVER = 0,
-	ASSERT_UNTIL_SCAN,
-	ASSERT_UNTIL_ATTACH
-};
-
-static bool cmd_version(void);
-static bool cmd_help(target *t);
+static bool cmd_version(target *t, int argc, char **argv);
+static bool cmd_help(target *t, int argc, char **argv);
 
 static bool cmd_jtag_scan(target *t, int argc, char **argv);
-static bool cmd_swdp_scan(void);
-static bool cmd_targets(void);
-static bool cmd_morse(void);
-static bool cmd_assert_srst(target *t, int argc, const char **argv);
+static bool cmd_swdp_scan(target *t, int argc, char **argv);
+static bool cmd_frequency(target *t, int argc, char **argv);
+static bool cmd_targets(target *t, int argc, char **argv);
+static bool cmd_morse(target *t, int argc, char **argv);
 static bool cmd_halt_timeout(target *t, int argc, const char **argv);
-static bool cmd_hard_srst(void);
+static bool cmd_connect_srst(target *t, int argc, const char **argv);
+static bool cmd_hard_srst(target *t, int argc, const char **argv);
 #ifdef PLATFORM_HAS_POWER_SWITCH
 static bool cmd_target_power(target *t, int argc, const char **argv);
 #endif
 #ifdef PLATFORM_HAS_TRACESWO
 static bool cmd_traceswo(target *t, int argc, const char **argv);
 #endif
-#ifdef PLATFORM_HAS_DEBUG
+static bool cmd_heapinfo(target *t, int argc, const char **argv);
+#if defined(PLATFORM_HAS_DEBUG) && (PC_HOSTED == 0)
 static bool cmd_debug_bmp(target *t, int argc, const char **argv);
 #endif
 
@@ -74,34 +65,41 @@ const struct command_s cmd_list[] = {
 	{"help", (cmd_handler)cmd_help, "Display help for monitor commands"},
 	{"jtag_scan", (cmd_handler)cmd_jtag_scan, "Scan JTAG chain for devices" },
 	{"swdp_scan", (cmd_handler)cmd_swdp_scan, "Scan SW-DP for devices" },
+	{"frequency", (cmd_handler)cmd_frequency, "set minimum high and low times" },
 	{"targets", (cmd_handler)cmd_targets, "Display list of available targets" },
 	{"morse", (cmd_handler)cmd_morse, "Display morse error message" },
-	{"assert_srst", (cmd_handler)cmd_assert_srst, "Assert SRST until:(never(default)| scan | attach)" },
 	{"halt_timeout", (cmd_handler)cmd_halt_timeout, "Timeout (ms) to wait until Cortex-M is halted: (Default 2000)" },
+	{"connect_srst", (cmd_handler)cmd_connect_srst, "Configure connect under SRST: (enable|disable)" },
 	{"hard_srst", (cmd_handler)cmd_hard_srst, "Force a pulse on the hard SRST line - disconnects target" },
 #ifdef PLATFORM_HAS_POWER_SWITCH
 	{"tpwr", (cmd_handler)cmd_target_power, "Supplies power to the target: (enable|disable)"},
 #endif
 #ifdef PLATFORM_HAS_TRACESWO
-	{"traceswo", (cmd_handler)cmd_traceswo, "Start trace capture [(baudrate) for async swo]" },
+#if defined TRACESWO_PROTOCOL && TRACESWO_PROTOCOL == 2
+	{"traceswo", (cmd_handler)cmd_traceswo, "Start trace capture, NRZ mode: (baudrate) (decode channel ...)" },
+#else
+	{"traceswo", (cmd_handler)cmd_traceswo, "Start trace capture, Manchester mode: (decode channel ...)" },
 #endif
-#ifdef PLATFORM_HAS_DEBUG
+#endif
+	{"heapinfo", (cmd_handler)cmd_heapinfo, "Set semihosting heapinfo" },
+#if defined(PLATFORM_HAS_DEBUG) && (PC_HOSTED == 0)
 	{"debug_bmp", (cmd_handler)cmd_debug_bmp, "Output BMP \"debug\" strings to the second vcom: (enable|disable)"},
 #endif
 	{NULL, NULL, NULL}
 };
 
-static enum assert_srst_t assert_srst;
-#ifdef PLATFORM_HAS_DEBUG
+bool connect_assert_srst;
+#if defined(PLATFORM_HAS_DEBUG) && (PC_HOSTED == 0)
 bool debug_bmp;
 #endif
-long cortexm_wait_timeout = 2000; /* Timeout to wait for Cortex to react on halt command. */
+unsigned cortexm_wait_timeout = 2000; /* Timeout to wait for Cortex to react on halt command. */
 
 int command_process(target *t, char *cmd)
 {
 	const struct command_s *c;
-	int argc = 0;
+	int argc = 1;
 	const char **argv;
+	const char *part;
 
 	/* Initial estimate for argc */
 	for(char *s = cmd; *s; s++)
@@ -110,8 +108,9 @@ int command_process(target *t, char *cmd)
 	argv = alloca(sizeof(const char *) * argc);
 
 	/* Tokenize cmd to find argv */
-	for(argc = 0, argv[argc] = strtok(cmd, " \t");
-		argv[argc]; argv[++argc] = strtok(NULL, " \t"));
+	argc = 0;
+	for (part = strtok(cmd, " \t"); part; part = strtok(NULL, " \t"))
+		argv[argc++] = part;
 
 	/* Look for match and call handler */
 	for(c = cmd_list; c->cmd; c++) {
@@ -128,24 +127,39 @@ int command_process(target *t, char *cmd)
 	return target_command(t, argc, argv);
 }
 
-bool cmd_version(void)
+#define BOARD_IDENT "Black Magic Probe" PLATFORM_IDENT FIRMWARE_VERSION
+
+bool cmd_version(target *t, int argc, char **argv)
 {
-	gdb_outf("Black Magic Probe (Firmware " FIRMWARE_VERSION ") (Hardware Version %d)\n", platform_hwversion());
+	(void)t;
+	(void)argc;
+	(void)argv;
+#if PC_HOSTED == 1
+	char ident[256];
+	gdb_ident(ident, sizeof(ident));
+	DEBUG_WARN("%s\n", ident);
+#else
+	gdb_out(BOARD_IDENT);
+	gdb_outf(", Hardware Version %d\n", platform_hwversion());
 	gdb_out("Copyright (C) 2015  Black Sphere Technologies Ltd.\n");
 	gdb_out("License GPLv3+: GNU GPL version 3 or later "
 		"<http://gnu.org/licenses/gpl.html>\n\n");
+#endif
 
 	return true;
 }
 
-bool cmd_help(target *t)
+bool cmd_help(target *t, int argc, char **argv)
 {
+	(void)argc;
+	(void)argv;
 	const struct command_s *c;
 
-	gdb_out("General commands:\n");
-	for(c = cmd_list; c->cmd; c++)
-		gdb_outf("\t%s -- %s\n", c->cmd, c->help);
-
+	if (!t || t->tc->destroy_callback) {
+		gdb_out("General commands:\n");
+		for(c = cmd_list; c->cmd; c++)
+			gdb_outf("\t%s -- %s\n", c->cmd, c->help);
+	}
 	if (!t)
 		return -1;
 
@@ -159,7 +173,8 @@ static bool cmd_jtag_scan(target *t, int argc, char **argv)
 	(void)t;
 	uint8_t irlens[argc];
 
-	gdb_outf("Target voltage: %s\n", platform_target_voltage());
+	if (platform_target_voltage())
+		gdb_outf("Target voltage: %s\n", platform_target_voltage());
 
 	if (argc > 1) {
 		/* Accept a list of IR lengths on command line */
@@ -168,15 +183,17 @@ static bool cmd_jtag_scan(target *t, int argc, char **argv)
 		irlens[argc-1] = 0;
 	}
 
-	if(assert_srst != ASSERT_NEVER)
-		platform_srst_set_val(true);
-	if(assert_srst == ASSERT_UNTIL_SCAN)
-		platform_srst_set_val(false);
+	if(connect_assert_srst)
+		platform_srst_set_val(true); /* will be deasserted after attach */
 
 	int devs = -1;
 	volatile struct exception e;
 	TRY_CATCH (e, EXCEPTION_ALL) {
+#if PC_HOSTED == 1
+		devs = platform_jtag_scan(argc > 1 ? irlens : NULL);
+#else
 		devs = jtag_scan(argc > 1 ? irlens : NULL);
+#endif
 	}
 	switch (e.type) {
 	case EXCEPTION_TIMEOUT:
@@ -192,25 +209,32 @@ static bool cmd_jtag_scan(target *t, int argc, char **argv)
 		gdb_out("JTAG device scan failed!\n");
 		return false;
 	}
-	cmd_targets();
+	cmd_targets(NULL, 0, NULL);
 	morse(NULL, false);
 	return true;
 }
 
-bool cmd_swdp_scan(void)
+bool cmd_swdp_scan(target *t, int argc, char **argv)
 {
-	gdb_outf("Target voltage: %s\n", platform_target_voltage());
+	(void)t;
+	volatile uint32_t targetid = 0;
+	if (argc > 1)
+		targetid  = strtol(argv[1], NULL, 0);
+	if (platform_target_voltage())
+		gdb_outf("Target voltage: %s\n", platform_target_voltage());
 
-	if(assert_srst != ASSERT_NEVER)
-		platform_srst_set_val(true);
-	if(assert_srst == ASSERT_UNTIL_SCAN)
-		platform_srst_set_val(false);
+	if(connect_assert_srst)
+		platform_srst_set_val(true); /* will be deasserted after attach */
 
 	int devs = -1;
 	volatile struct exception e;
 	TRY_CATCH (e, EXCEPTION_ALL) {
-		devs = adiv5_swdp_scan();
-	}
+#if PC_HOSTED == 1
+		devs = platform_adiv5_swdp_scan(targetid);
+#else
+		devs = adiv5_swdp_scan(targetid);
+#endif
+		}
 	switch (e.type) {
 	case EXCEPTION_TIMEOUT:
 		gdb_outf("Timeout during scan. Is target stuck in WFI?\n");
@@ -226,8 +250,33 @@ bool cmd_swdp_scan(void)
 		return false;
 	}
 
-	cmd_targets();
+	cmd_targets(NULL, 0, NULL);
 	morse(NULL, false);
+	return true;
+
+}
+
+bool cmd_frequency(target *t, int argc, char **argv)
+{
+	(void)t;
+	if (argc == 2) {
+		char *p;
+		uint32_t frequency = strtol(argv[1], &p, 10);
+		switch(*p) {
+		case 'k':
+			frequency *= 1000;
+			break;
+		case 'M':
+			frequency *= 1000*1000;
+			break;
+		}
+		platform_max_frequency_set(frequency);
+	}
+	uint32_t freq = platform_max_frequency_get();
+	if (freq == FREQ_FIXED)
+		gdb_outf("SWJ freq fixed\n");
+	else
+		gdb_outf("Max SWJ freq %08" PRIx32 "\n", freq);
 	return true;
 
 }
@@ -235,11 +284,25 @@ bool cmd_swdp_scan(void)
 static void display_target(int i, target *t, void *context)
 {
 	(void)context;
-	gdb_outf("%2d   %c  %s\n", i, target_attached(t)?'*':' ', target_driver_name(t));
+	if (!strcmp(target_driver_name(t), "ARM Cortex-M")) {
+		gdb_outf("***%2d%sUnknown %s Designer %3x Partno %3x %s\n",
+				 i, target_attached(t)?" * ":" ",
+				 target_driver_name(t),
+				 target_designer(t),
+				 target_idcode(t),
+				 (target_core_name(t)) ? target_core_name(t): "");
+	} else {
+		gdb_outf("%2d   %c  %s %s\n", i, target_attached(t)?'*':' ',
+				 target_driver_name(t),
+				 (target_core_name(t)) ? target_core_name(t): "");
+	}
 }
 
-bool cmd_targets(void)
+bool cmd_targets(target *t, int argc, char **argv)
 {
+	(void)t;
+	(void)argc;
+	(void)argv;
 	gdb_out("Available Targets:\n");
 	gdb_out("No. Att Driver\n");
 	if (!target_foreach(display_target, NULL)) {
@@ -250,27 +313,52 @@ bool cmd_targets(void)
 	return true;
 }
 
-bool cmd_morse(void)
+bool cmd_morse(target *t, int argc, char **argv)
 {
-	if(morse_msg)
+	(void)t;
+	(void)argc;
+	(void)argv;
+	if(morse_msg) {
 		gdb_outf("%s\n", morse_msg);
+		DEBUG_WARN("%s\n", morse_msg);
+	}
 	return true;
 }
 
-static bool cmd_assert_srst(target *t, int argc, const char **argv)
+bool parse_enable_or_disable(const char *s, bool *out) {
+	if (strlen(s) == 0) {
+		gdb_outf("'enable' or 'disable' argument must be provided\n");
+		return false;
+	} else if (!strncmp(s, "enable", strlen(s))) {
+		*out = true;
+		return true;
+	} else if (!strncmp(s, "disable", strlen(s))) {
+		*out = false;
+		return true;
+	} else {
+		gdb_outf("Argument '%s' not recognized as 'enable' or 'disable'\n", s);
+		return false;
+	}
+}
+
+static bool cmd_connect_srst(target *t, int argc, const char **argv)
 {
 	(void)t;
-	if (argc > 1) {
-		if (!strcmp(argv[1], "attach"))
-			assert_srst = ASSERT_UNTIL_ATTACH;
-		else if (!strcmp(argv[1], "scan"))
-			assert_srst = ASSERT_UNTIL_SCAN;
-		else
-			assert_srst = ASSERT_NEVER;
+	bool print_status = false;
+	if (argc == 1) {
+		print_status = true;
+	} else if (argc == 2) {
+		if (parse_enable_or_disable(argv[1], &connect_assert_srst)) {
+			print_status = true;
+		}
+	} else {
+		gdb_outf("Unrecognized command format\n");
 	}
-	gdb_outf("Assert SRST %s\n",
-			 (assert_srst == ASSERT_UNTIL_ATTACH) ? "until attach" :
-			 (assert_srst == ASSERT_UNTIL_SCAN) ? "until scan" : "never");
+
+	if (print_status) {
+		gdb_outf("Assert SRST during connect: %s\n",
+			 connect_assert_srst ? "enabled" : "disabled");
+	}
 	return true;
 }
 
@@ -284,8 +372,11 @@ static bool cmd_halt_timeout(target *t, int argc, const char **argv)
 	return true;
 }
 
-static bool cmd_hard_srst(void)
+static bool cmd_hard_srst(target *t, int argc, const char **argv)
 {
+	(void)t;
+	(void)argc;
+	(void)argv;
 	target_list_free();
 	platform_srst_set_val(true);
 	platform_srst_set_val(false);
@@ -296,11 +387,25 @@ static bool cmd_hard_srst(void)
 static bool cmd_target_power(target *t, int argc, const char **argv)
 {
 	(void)t;
-	if (argc == 1)
+	if (argc == 1) {
 		gdb_outf("Target Power: %s\n",
 			 platform_target_get_power() ? "enabled" : "disabled");
-	else
-		platform_target_set_power(!strncmp(argv[1], "enable", strlen(argv[1])));
+	} else if (argc == 2) {
+		bool want_enable = false;
+		if (parse_enable_or_disable(argv[1], &want_enable)) {
+			if (want_enable
+				&& !platform_target_get_power()
+				&& platform_target_voltage_sense() > POWER_CONFLICT_THRESHOLD) {
+				/* want to enable target power, but VREF > 0.5V sensed -> cancel */
+				gdb_outf("Target already powered (%s)\n", platform_target_voltage());
+			} else {
+				platform_target_set_power(want_enable);
+				gdb_outf("%s target power\n", want_enable ? "Enabling" : "Disabling");
+			}
+		}
+	} else {
+		gdb_outf("Unrecognized command format\n");
+	}
 	return true;
 }
 #endif
@@ -308,32 +413,91 @@ static bool cmd_target_power(target *t, int argc, const char **argv)
 #ifdef PLATFORM_HAS_TRACESWO
 static bool cmd_traceswo(target *t, int argc, const char **argv)
 {
-#if defined(STM32L0) || defined(STM32F3) || defined(STM32F4)
-	extern char serial_no[13];
-#else
-	extern char serial_no[9];
-#endif
-	uint32_t baudrate = 0;
+	char serial_no[DFU_SERIAL_LENGTH];
 	(void)t;
-
-	if (argc > 1)
+#if TRACESWO_PROTOCOL == 2
+	uint32_t baudrate = SWO_DEFAULT_BAUD;
+#endif
+	uint32_t swo_channelmask = 0; /* swo decoding off */
+	uint8_t decode_arg = 1;
+#if TRACESWO_PROTOCOL == 2
+	/* argument: optional baud rate for async mode */
+	if ((argc > 1) && (*argv[1] >= '0') && (*argv[1] <= '9')) {
 		baudrate = atoi(argv[1]);
-
-	traceswo_init(baudrate);
+		if (baudrate == 0) baudrate = SWO_DEFAULT_BAUD;
+		decode_arg = 2;
+	}
+#endif
+	/* argument: 'decode' literal */
+	if((argc > decode_arg) &&  !strncmp(argv[decode_arg], "decode", strlen(argv[decode_arg]))) {
+		swo_channelmask = 0xFFFFFFFF; /* decoding all channels */
+		/* arguments: channels to decode */
+		if (argc > decode_arg + 1) {
+			swo_channelmask = 0x0;
+			for (int i = decode_arg+1; i < argc; i++) { /* create bitmask of channels to decode */
+				int channel = atoi(argv[i]);
+				if ((channel >= 0) && (channel <= 31))
+					swo_channelmask |= (uint32_t)0x1 << channel;
+			}
+		}
+	}
+#if defined(PLATFORM_HAS_DEBUG) && (PC_HOSTED == 0) && defined(ENABLE_DEBUG)
+	if (debug_bmp) {
+#if TRACESWO_PROTOCOL == 2
+		gdb_outf("baudrate: %lu ", baudrate);
+#endif
+		gdb_outf("channel mask: ");
+		for (int8_t i=31;i>=0;i--) {
+			uint8_t bit = (swo_channelmask >> i) & 0x1;
+			gdb_outf("%u", bit);
+		}
+		gdb_outf("\n");
+	}
+#endif
+#if TRACESWO_PROTOCOL == 2
+	traceswo_init(baudrate, swo_channelmask);
+#else
+	traceswo_init(swo_channelmask);
+#endif
+	serial_no_read(serial_no);
 	gdb_outf("%s:%02X:%02X\n", serial_no, 5, 0x85);
 	return true;
 }
 #endif
 
-#ifdef PLATFORM_HAS_DEBUG
+#if defined(PLATFORM_HAS_DEBUG) && (PC_HOSTED == 0)
 static bool cmd_debug_bmp(target *t, int argc, const char **argv)
 {
 	(void)t;
-	if (argc > 1) {
-		debug_bmp = !strcmp(argv[1], "enable");
+	bool print_status = false;
+	if (argc == 1) {
+		print_status = true;
+	} else if (argc == 2) {
+		if (parse_enable_or_disable(argv[1], &debug_bmp)) {
+			print_status = true;
+		}
+	} else {
+		gdb_outf("Unrecognized command format\n");
 	}
-	gdb_outf("Debug mode is %s\n",
-		 debug_bmp ? "enabled" : "disabled");
+
+	if (print_status) {
+		gdb_outf("Debug mode is %s\n",
+			 debug_bmp ? "enabled" : "disabled");
+	}
 	return true;
 }
 #endif
+static bool cmd_heapinfo(target *t, int argc, const char **argv)
+{
+	if (t == NULL) gdb_out("not attached\n");
+	else if (argc == 5) {
+		target_addr heap_base = strtoul(argv[1], NULL, 16);
+		target_addr heap_limit = strtoul(argv[2], NULL, 16);
+		target_addr stack_base = strtoul(argv[3], NULL, 16);
+		target_addr stack_limit = strtoul(argv[4], NULL, 16);
+		gdb_outf("heapinfo heap_base: %p heap_limit: %p stack_base: %p stack_limit: %p\n",
+			heap_base, heap_limit, stack_base, stack_limit);
+		target_set_heapinfo(t, heap_base, heap_limit, stack_base, stack_limit);
+	} else gdb_outf("heapinfo heap_base heap_limit stack_base stack_limit\n");
+	return true;
+}

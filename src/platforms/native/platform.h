@@ -30,14 +30,15 @@
 
 #define PLATFORM_HAS_TRACESWO
 #define PLATFORM_HAS_POWER_SWITCH
+
 #ifdef ENABLE_DEBUG
-#define PLATFORM_HAS_DEBUG
-#define USBUART_DEBUG
+# define PLATFORM_HAS_DEBUG
+# define USBUART_DEBUG
+extern bool debug_bmp;
+int usbuart_debug_write(const char *buf, size_t len);
 #endif
-#define BOARD_IDENT             "Black Magic Probe"
-#define BOARD_IDENT_DFU	        "Black Magic Probe (Upgrade)"
-#define BOARD_IDENT_UPD	        "Black Magic Probe (DFU Upgrade)"
-#define DFU_IDENT               "Black Magic Firmware Upgrade"
+
+#define PLATFORM_IDENT          " "
 #define UPD_IFACE_STRING        "@Internal Flash   /0x08000000/8*001Kg"
 
 #define SCB_RESET()		scb_reset_core();
@@ -48,7 +49,7 @@
  * LED1 = 	PB10	(Yellow LED : Idle)
  * LED2 = 	PB11	(Red LED    : Error)
  *
- * TPWR = 	RB0 (input) -- analogue on mini design ADC1, ch8
+ * TPWR = 	PB0 (input) -- analogue on mini design ADC1, ch8
  * nTRST = 	PB1 (output) [blackmagic]
  * PWR_BR = 	PB1 (output) [blackmagic_mini] -- supply power to the target, active low
  * TMS_DIR =    PA1 (output) [blackmagic_mini v2.1] -- choose direction of the TCK pin, input low, output high
@@ -110,73 +111,106 @@
 #define LED_IDLE_RUN	LED_1
 #define LED_ERROR	LED_2
 
+# define SWD_CR   GPIO_CRL(SWDIO_PORT)
+# define SWD_CR_MULT (1 << (4 << 2))
+
 #define TMS_SET_MODE() do { \
 	gpio_set(TMS_DIR_PORT, TMS_DIR_PIN); \
 	gpio_set_mode(TMS_PORT, GPIO_MODE_OUTPUT_50_MHZ, \
 	              GPIO_CNF_OUTPUT_PUSHPULL, TMS_PIN); \
 } while(0)
 #define SWDIO_MODE_FLOAT() do { \
-	gpio_set_mode(SWDIO_PORT, GPIO_MODE_INPUT, \
-	              GPIO_CNF_INPUT_FLOAT, SWDIO_PIN); \
-	gpio_clear(SWDIO_DIR_PORT, SWDIO_DIR_PIN); \
+	uint32_t cr = SWD_CR; \
+	cr  &= ~(0xf * SWD_CR_MULT); \
+	cr  |=  (0x4 * SWD_CR_MULT); \
+	GPIO_BRR(SWDIO_DIR_PORT) = SWDIO_DIR_PIN; \
+	SWD_CR = cr; \
 } while(0)
 #define SWDIO_MODE_DRIVE() do { \
-	gpio_set(SWDIO_DIR_PORT, SWDIO_DIR_PIN); \
-	gpio_set_mode(SWDIO_PORT, GPIO_MODE_OUTPUT_50_MHZ, \
-	              GPIO_CNF_OUTPUT_PUSHPULL, SWDIO_PIN); \
+	uint32_t cr = SWD_CR; \
+	cr  &= ~(0xf * SWD_CR_MULT); \
+	cr  |=  (0x1 * SWD_CR_MULT); \
+	GPIO_BSRR(SWDIO_DIR_PORT) = SWDIO_DIR_PIN; \
+	SWD_CR = cr; \
 } while(0)
 #define UART_PIN_SETUP() do { \
-	gpio_set_mode(USBUSART_PORT, GPIO_MODE_OUTPUT_2_MHZ, \
+	gpio_set_mode(USBUSART_PORT, GPIO_MODE_OUTPUT_50_MHZ, \
 	              GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, USBUSART_TX_PIN); \
+	gpio_set_mode(USBUSART_PORT, GPIO_MODE_INPUT, \
+				  GPIO_CNF_INPUT_PULL_UPDOWN, USBUSART_RX_PIN); \
+	gpio_set(USBUSART_PORT, USBUSART_RX_PIN); \
 } while(0)
 
 #define USB_DRIVER st_usbfs_v1_usb_driver
 #define USB_IRQ    NVIC_USB_LP_CAN_RX0_IRQ
-#define USB_ISR    usb_lp_can_rx0_isr
+#define USB_ISR(x) usb_lp_can_rx0_isr(x)
 /* Interrupt priorities.  Low numbers are high priority.
- * For now USART1 preempts USB which may spin while buffer is drained.
  * TIM3 is used for traceswo capture and must be highest priority.
  */
-#define IRQ_PRI_USB             (2 << 4)
-#define IRQ_PRI_USBUSART        (1 << 4)
-#define IRQ_PRI_USBUSART_TIM    (3 << 4)
+#define IRQ_PRI_USB             (1 << 4)
+#define IRQ_PRI_USBUSART        (2 << 4)
+#define IRQ_PRI_USBUSART_DMA 	(2 << 4)
 #define IRQ_PRI_USB_VBUS        (14 << 4)
 #define IRQ_PRI_TRACE           (0 << 4)
 
 #define USBUSART USART1
 #define USBUSART_CR1 USART1_CR1
+#define USBUSART_DR USART1_DR
 #define USBUSART_IRQ NVIC_USART1_IRQ
 #define USBUSART_CLK RCC_USART1
 #define USBUSART_PORT GPIOA
 #define USBUSART_TX_PIN GPIO9
-#define USBUSART_ISR usart1_isr
-#define USBUSART_TIM TIM4
-#define USBUSART_TIM_CLK_EN() rcc_periph_clock_enable(RCC_TIM4)
-#define USBUSART_TIM_IRQ NVIC_TIM4_IRQ
-#define USBUSART_TIM_ISR tim4_isr
+#define USBUSART_RX_PIN GPIO10
+#define USBUSART_ISR(x) usart1_isr(x)
+#define USBUSART_DMA_BUS DMA1
+#define USBUSART_DMA_CLK RCC_DMA1
+#define USBUSART_DMA_TX_CHAN DMA_CHANNEL4
+#define USBUSART_DMA_TX_IRQ NVIC_DMA1_CHANNEL4_IRQ
+#define USBUSART_DMA_TX_ISR(x) dma1_channel4_isr(x)
+#define USBUSART_DMA_RX_CHAN DMA_CHANNEL5
+#define USBUSART_DMA_RX_IRQ NVIC_DMA1_CHANNEL5_IRQ
+#define USBUSART_DMA_RX_ISR(x) dma1_channel5_isr(x)
 
 #define TRACE_TIM TIM3
 #define TRACE_TIM_CLK_EN() rcc_periph_clock_enable(RCC_TIM3)
 #define TRACE_IRQ   NVIC_TIM3_IRQ
-#define TRACE_ISR   tim3_isr
-
-#ifdef ENABLE_DEBUG
-extern bool debug_bmp;
-int usbuart_debug_write(const char *buf, size_t len);
-
-#define DEBUG printf
-#else
-#define DEBUG(...)
-#endif
+#define TRACE_ISR(x)  tim3_isr(x)
 
 #define SET_RUN_STATE(state)	{running_status = (state);}
 #define SET_IDLE_STATE(state)	{gpio_set_val(LED_PORT, LED_IDLE_RUN, state);}
 #define SET_ERROR_STATE(state)	{gpio_set_val(LED_PORT, LED_ERROR, state);}
 
-/* Use newlib provided integer only stdio functions */
+/*
+ * Use newlib provided integer only stdio functions
+ */
+
+/* sscanf */
+#ifdef sscanf
+#undef sscanf
 #define sscanf siscanf
+#else
+#define sscanf siscanf
+#endif
+/* sprintf */
+#ifdef sprintf
+#undef sprintf
 #define sprintf siprintf
-#define snprintf sniprintf
+#else
+#define sprintf siprintf
+#endif
+/* vasprintf */
+#ifdef vasprintf
+#undef vasprintf
 #define vasprintf vasiprintf
+#else
+#define vasprintf vasiprintf
+#endif
+/* snprintf */
+#ifdef snprintf
+#undef snprintf
+#define snprintf sniprintf
+#else
+#define snprintf sniprintf
+#endif
 
 #endif

@@ -27,7 +27,7 @@
 #include "usbuart.h"
 #include "morse.h"
 
-#include <libopencm3/stm32/f4/rcc.h>
+#include <libopencm3/stm32/rcc.h>
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/stm32/exti.h>
@@ -46,7 +46,7 @@ void platform_init(void)
 		scb_reset_core();
 	}
 
-	rcc_clock_setup_hse_3v3(&rcc_hse_8mhz_3v3[RCC_CLOCK_3V3_48MHZ]);
+	rcc_clock_setup_pll(&rcc_hse_8mhz_3v3[RCC_CLOCK_3V3_168MHZ]);
 
 	/* Enable peripherals */
 	rcc_peripheral_enable_clock(&RCC_AHB2ENR, RCC_AHB2ENR_OTGFSEN);
@@ -63,7 +63,9 @@ void platform_init(void)
 	GPIOC_OSPEEDR |= 0xA20;
 	gpio_mode_setup(JTAG_PORT, GPIO_MODE_OUTPUT,
 			GPIO_PUPD_NONE,
-			TMS_PIN | TCK_PIN | TDI_PIN);
+			TCK_PIN | TDI_PIN);
+	gpio_mode_setup(JTAG_PORT, GPIO_MODE_INPUT,
+			GPIO_PUPD_NONE, TMS_PIN);
 
 	gpio_mode_setup(TDO_PORT, GPIO_MODE_INPUT,
 			GPIO_PUPD_NONE,
@@ -83,7 +85,7 @@ bool platform_srst_get_val(void) { return false; }
 
 const char *platform_target_voltage(void)
 {
-	return "ABSENT!";
+	return NULL;
 }
 
 void platform_request_boot(void)
